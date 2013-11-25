@@ -1,6 +1,11 @@
 package org.bbyk.prototypes.perf.backlog;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.primitives.Ints;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory.Builder;
+import org.apache.commons.lang3.mutable.MutableLong;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,116 +18,190 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * @author bbyk
  */
 public class RuthlessClientTest {
+    private static final int MILLISECONDS_PER_SECOND = 1000;
+
     private final static Logger logger = LoggerFactory.getLogger(RuthlessClientTest.class);
-    private final static int numOfCpus = Integer.getInteger("numOfCpus", 4);
+    private final static int bufferSize = Integer.getInteger("bufferSize", 8192);
+    private final static int numOfCpus = Integer.getInteger("numOfCpus", Runtime.getRuntime().availableProcessors());
     private final static Charset encoding = Charset.forName("utf8");
     private final static String serverHost = System.getProperty("serverHost", "localhost");
-    private final static int serverPort = Integer.getInteger("serverPort", 8080);
+    private final static int serverPort = Integer.getInteger("serverPort", 8081);
     private final static InetSocketAddress serverAddr = new InetSocketAddress(serverHost, serverPort);
-    private final static String endPointPath = System.getProperty("endPointPath", "/");
-    private final static ByteBuffer tempaterRequestBuffer = encoding.encode(CharBuffer.wrap("GET " + endPointPath + " HTTP/1.0\r\n\r\n"));
+    private final static String endPointPath = System.getProperty("endPointPath", "/server/endpoint");
+    private final static ByteBuffer tempRequestBuffer = encoding.encode(CharBuffer.wrap("GET " + endPointPath + " HTTP/1.0\r\n\r\n"));
+    private final static String successData = System.getProperty("successData", "success");
+    private final static int requestsPerSecond = Integer.getInteger("requestsPerSecond", 1600);
+    private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);
+    private final static long tickIntervalMs = Integer.getInteger("tickIntervalMs", 10);
+    private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
 
     @Test
     public void stableRateConcurrentUsers() throws Exception {
         // epoll or kqueue is behind
-        final ExecutorService ioLoopThreadPool = Executors.newFixedThreadPool(numOfCpus);
-        final LinkedBlockingQueue<ConnectionData> connectionDatas = new LinkedBlockingQueue<ConnectionData>();
-        final int numberOfRequests = 400;
+        final int numberOfRequests = requestsPerSecond * testDurationInSeconds;
+        logger.info("number of requests {}", numberOfRequests);
         final CountDownLatch allDone = new CountDownLatch(numberOfRequests);
+
+        final Builder ioLoopThreadPoolThreadFactoryBuilder = new BasicThreadFactory.Builder();
+        ioLoopThreadPoolThreadFactoryBuilder.namingPattern("ioLoop-%s");
+        ioLoopThreadPoolThreadFactoryBuilder.daemon(true);
+        final ExecutorService ioLoopThreadPool = new ThreadPoolExecutor(
+                numOfCpus, numOfCpus,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<Runnable>(),
+                ioLoopThreadPoolThreadFactoryBuilder.build());
+
+        final Builder loadBalancerThreadPoolThreadFactoryBuilder = new BasicThreadFactory.Builder();
+        loadBalancerThreadPoolThreadFactoryBuilder.namingPattern("loadBalancer-%s");
+        loadBalancerThreadPoolThreadFactoryBuilder.daemon(true);
+        final ExecutorService loadBalancerThreadPool = new ThreadPoolExecutor(
+                1, 1,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<Runnable>(),
+                loadBalancerThreadPoolThreadFactoryBuilder.build());
+
+        final LinkedBlockingQueue<RequestData> requestsPendingToSend = new LinkedBlockingQueue<RequestData>();
         final Selector[] selectors = new Selector[numOfCpus];
         final CountDownLatch allStarted = new CountDownLatch(numOfCpus);
+        final AtomicInteger errorCount = new AtomicInteger();
+        final AtomicInteger connectedCount = new AtomicInteger();
+        final AtomicInteger writtenCount = new AtomicInteger();
+        final AtomicInteger readCount = new AtomicInteger();
+        final Object syncRoot = new Object();
+        final ConcurrentMap<RequestData, RequestData> currentlyExecutingRequests = Maps.newConcurrentMap();
+        final AtomicInteger initiatedRequestsCount = new AtomicInteger();
+        final AtomicInteger processedRequestsCount = new AtomicInteger();
+        final AtomicLong openSocketTookMsMax = new AtomicLong();
 
-        for (int i = 0; i < numOfCpus; i++) {
-            final int selectorId = i;
+        for (int ci = 0; ci < numOfCpus; ci++) {
+            final int selectorId = ci;
             ioLoopThreadPool.execute(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        final Selector selector = Selector.open();
+                        final Selector selector;
+
+                        // Oracle didn't fix the bug for sun.nio.ch.Util.atBugLevel
+                        // http://bugs.sun.com/view_bug.do?bug_id=6427854
+                        synchronized (syncRoot) {
+                            selector = Selector.open();
+                        }
                         selectors[selectorId] = selector;
                         allStarted.countDown();
 
-                        final List<ConnectionData> newConnections = Lists.newArrayList();
+                        final List<RequestData> newRequests = Lists.newArrayList();
 
+                        //noinspection InfiniteLoopStatement
                         while (true) {
                             final int selected = selector.select();
-                            logger.info("selected: " + selected);
+                            final Set<SelectionKey> selectionKeys = selector.selectedKeys();
 
+                            if (logger.isDebugEnabled())
+                                logger.debug("selected: " + selected);
 
-                            newConnections.clear();
-                            connectionDatas.drainTo(newConnections);
+                            newRequests.clear();
+                            requestsPendingToSend.drainTo(newRequests);
 
-                            for (final ConnectionData connectionData : newConnections) {
-                                final SelectionKey selectionKey = connectionData.socketChannel.register(selector, SelectionKey.OP_CONNECT);
-                                selectionKey.attach(connectionData);
+                            // establish currentlyExecutingRequests for the new requests
+                            for (final RequestData requestData : newRequests) {
+                                final SelectionKey selectionKey = requestData.socketChannel.register(selector, SelectionKey.OP_CONNECT);
+                                selectionKey.attach(requestData);
+                                try {
+                                    requestData.socketChannel.connect(serverAddr);
+                                    currentlyExecutingRequests.putIfAbsent(requestData, requestData);
+                                    initiatedRequestsCount.incrementAndGet();
+                                } catch (IOException e) {
+                                    if (verboseErrors)
+                                        logger.error("error establishing connection", e);
+                                    closeKeyOnError(selectionKey);
+                                }
                             }
 
-                            final Set<SelectionKey> selectionKeys = selector.selectedKeys();
-                            logger.info("selected keys: " + selectionKeys.size());
+                            if (logger.isDebugEnabled())
+                                logger.debug("selected keys: " + selectionKeys.size());
 
                             final Iterator<SelectionKey> selectionKeyIterator = selectionKeys.iterator();
                             while (selectionKeyIterator.hasNext()) {
                                 final SelectionKey selectionKey = selectionKeyIterator.next();
                                 selectionKeyIterator.remove();
 
-                                if (!selectionKey.isValid())
+                                if (!selectionKey.isValid()) {
+                                    closeKeyOnError(selectionKey);
                                     continue;
+                                }
 
                                 if (selectionKey.isConnectable()) {
+                                    final RequestData requestData = (RequestData) selectionKey.attachment();
                                     try {
-                                        final ConnectionData connectionData = (ConnectionData) selectionKey.attachment();
-                                        if (!connectionData.socketChannel.finishConnect())
-                                            logger.error("connection isn't established");
-
-                                        selectionKey.interestOps(SelectionKey.OP_WRITE);
-                                    } catch (IOException e) {
-                                        logger.error("error finishing connection", e);
-                                        allDone.countDown();
-                                    }
-                                } else if (selectionKey.isReadable()) {
-                                    try {
-                                        // The buffer into which we'll read data when it's available
-                                        final ConnectionData connectionData = (ConnectionData) selectionKey.attachment();
-                                        connectionData.readBuffer.clear();
-
-                                        final int read = connectionData.socketChannel.read(connectionData.readBuffer);
-                                        logger.info("read bytes: " + read);
-                                        if (read == -1) {
-                                            allDone.countDown();
-                                            selectionKey.channel().close();
-                                            selectionKey.cancel();
-                                        } else {
-                                            connectionData.readBuffer.flip();
-                                            logger.info("response: " + encoding.decode(connectionData.readBuffer).toString());
+                                        if (!requestData.socketChannel.finishConnect()) {
+                                            if (verboseErrors)
+                                                logger.error("connection isn't established");
+                                            closeKeyOnError(selectionKey);
+                                            continue;
                                         }
 
+                                        connectedCount.incrementAndGet();
+                                        selectionKey.interestOps(SelectionKey.OP_WRITE);
                                     } catch (IOException e) {
-                                        logger.error("error reading data", e);
-                                        allDone.countDown();
+                                        if (verboseErrors)
+                                            logger.error("error finishing connection", e);
+                                        closeKeyOnError(selectionKey);
+                                    }
+                                } else if (selectionKey.isReadable()) {
+                                    final RequestData requestData = (RequestData) selectionKey.attachment();
+                                    try {
+                                        // The buffer into which we'll read data when it's available
+                                        requestData.readBuffer.clear();
+
+                                        final int read = requestData.socketChannel.read(requestData.readBuffer);
+                                        if (logger.isDebugEnabled())
+                                            logger.debug("read bytes: " + read);
+                                        if (read == -1) {
+                                            readCount.incrementAndGet();
+                                            closeKey(selectionKey);
+                                            requestData.finishRead();
+                                        } else {
+                                            requestData.readBytes.addAndGet(read);
+                                            requestData.processReadBuffer();
+                                        }
+                                    } catch (IOException e) {
+                                        if (verboseErrors)
+                                            logger.error("error reading data", e);
+                                        closeKeyOnError(selectionKey);
+                                        currentlyExecutingRequests.remove(requestData);
                                     }
                                 } else if (selectionKey.isWritable()) {
+                                    final RequestData requestData = (RequestData) selectionKey.attachment();
                                     try {
-                                        final ConnectionData connectionData = (ConnectionData) selectionKey.attachment();
-                                        final int write = connectionData.socketChannel.write(connectionData.writeBuffer);
-                                        logger.info("wrote bytes: " + write);
+                                        final int write = requestData.socketChannel.write(requestData.writeBuffer);
+                                        if (logger.isDebugEnabled())
+                                            logger.debug("written bytes: " + write);
 
+                                        writtenCount.incrementAndGet();
                                         selectionKey.interestOps(SelectionKey.OP_READ);
                                     } catch (IOException e) {
-                                        logger.error("error writing to socket", e);
-                                        allDone.countDown();
+                                        if (verboseErrors)
+                                            logger.error("error writing to socket", e);
+                                        closeKeyOnError(selectionKey);
                                     }
                                 }
                             }
@@ -131,43 +210,187 @@ public class RuthlessClientTest {
                         logger.error("error in io loop", e);
                     } finally {
                         // it's all over let's unblock ourselves
-                        for (int i = 0; i < allDone.getCount(); i++)
+                        while (allDone.getCount() > 0)
                             allDone.countDown();
                     }
+                }
+
+                private void closeKeyOnError(SelectionKey selectionKey) throws IOException {
+                    closeKey(selectionKey);
+                    errorCount.incrementAndGet();
+                }
+
+                private void closeKey(SelectionKey selectionKey) throws IOException {
+                    final RequestData requestData = (RequestData) selectionKey.attachment();
+                    allDone.countDown();
+                    selectionKey.channel().close();
+                    selectionKey.cancel();
+                    currentlyExecutingRequests.remove(requestData);
+                    processedRequestsCount.incrementAndGet();
                 }
             });
         }
 
         allStarted.await();
 
-        final Random random = new Random();
-        for (int i = 0; i < numberOfRequests; i++) {
-            // Create a non-blocking socket channel
-            SocketChannel socketChannel = SocketChannel.open();
-            socketChannel.configureBlocking(false);
+        final MutableLong lastTickWorkTookMs = new MutableLong();
+        final AtomicInteger requestsScheduled = new AtomicInteger();
 
-            final ConnectionData connectionData = new ConnectionData();
-            connectionData.socketChannel = socketChannel;
+        loadBalancerThreadPool.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    long lastTickTs = System.currentTimeMillis();
+                    int leftover = 0;
+                    final Random random = new Random();
+                    while (requestsScheduled.get() < numberOfRequests) {
+                        final long effectiveTickIntervalMs = Math.max(0, tickIntervalMs - lastTickWorkTookMs.getValue());
+                        if (effectiveTickIntervalMs > 0)
+                            Thread.sleep(effectiveTickIntervalMs);
 
-            socketChannel.connect(serverAddr);
-            connectionDatas.offer(connectionData);
+                        final long now = System.currentTimeMillis();
+                        final long elapsed = now - lastTickTs;
+                        final int effectiveElapsed = Ints.checkedCast(requestsPerSecond * elapsed) + leftover;
+                        final int requestsToSend = Math.min(numberOfRequests - requestsScheduled.get(), effectiveElapsed / MILLISECONDS_PER_SECOND);
 
-            final int selectorIndex = random.nextInt(numOfCpus);
-            logger.info("randomly selected: {}", selectorIndex);
-            final Selector selector = selectors[selectorIndex];
-            selector.wakeup();
+                        leftover = effectiveElapsed % MILLISECONDS_PER_SECOND;
+                        lastTickTs = now;
+
+                        if (requestsToSend == 0) {
+                            lastTickWorkTookMs.setValue(System.currentTimeMillis() - now);
+                            continue;
+                        }
+
+                        for (int j = 0; j < requestsToSend; j++) {
+                            // Create a non-blocking socket channel
+                            final long openSocketNow = System.currentTimeMillis();
+                            final SocketChannel socketChannel = SocketChannel.open();
+                            setIfGreater(openSocketTookMsMax, System.currentTimeMillis() - openSocketNow);
+
+                            if (logger.isDebugEnabled())
+                                logger.debug(String.format("default buffer sizes: %d %d", socketChannel.socket().getSendBufferSize(), socketChannel.socket().getReceiveBufferSize()));
+
+                            socketChannel.configureBlocking(false);
+                            socketChannel.socket().setSendBufferSize(bufferSize);
+                            socketChannel.socket().setReceiveBufferSize(bufferSize);
+                            socketChannel.socket().setTcpNoDelay(true);
+
+                            final RequestData requestData = new RequestData();
+                            requestData.socketChannel = socketChannel;
+
+                            requestsPendingToSend.offer(requestData);
+
+                            final int selectorIndex = random.nextInt(numOfCpus);
+                            if (logger.isDebugEnabled())
+                                logger.debug("randomly selected: {}", selectorIndex);
+                            final Selector selector = selectors[selectorIndex];
+                            selector.wakeup();
+                        }
+
+                        requestsScheduled.addAndGet(requestsToSend);
+                        lastTickWorkTookMs.setValue(System.currentTimeMillis() - now);
+                    }
+                } catch (Exception e) {
+                    logger.error("error partitioning data", e);
+                    // it's all over let's unblock ourselves
+
+                    while (allDone.getCount() > 0)
+                        allDone.countDown();
+                }
+            }
+        });
+
+
+        if (logger.isInfoEnabled()) {
+            final SocketChannel tmpSocketChannel = SocketChannel.open();
+            logger.info(String.format("default send/recv buffer sizes: %d %d", tmpSocketChannel.socket().getSendBufferSize(), tmpSocketChannel.socket().getReceiveBufferSize()));
+            logger.info(String.format("current send/recv buffer sizes: %d %d", bufferSize, bufferSize));
+            logger.info(String.format("default tcpNoDelay: %s", tmpSocketChannel.socket().getTcpNoDelay()));
+            logger.info(String.format("current tcpNoDelay: %s", true));
+
+            tmpSocketChannel.close();
         }
 
+        logger.info("Legend:\n" +
+                "es\t\t- elapsed seconds\n" +
+                "rsd\t\t- requests scheduled per tick\n" +
+                "irps\t- initiated requests per tick\n" +
+                "rps\t\t- processed requests per tick\n" +
+                "cer\t\t- currently executed requests\n" +
+                "err\t\t- errors per tick\n" +
+                "rpts\t- requests pending to send\n" +
+                "ost\t\t- max time SocketChannel#open took in ms\n" +
+                "cnd\t\t- total requests ever connected\n" +
+                "wrn\t\t- total requests ever written\n" +
+                "rd\t\t- total requests ever got response");
 
-        allDone.await();
+        final long startTs = System.currentTimeMillis();
+        long lastRequestsScheduled = requestsScheduled.get();
+        int lastInitiatedReqCount = initiatedRequestsCount.get();
+        int lastProcessedReqCount = processedRequestsCount.get();
+        int lastErrorCount = errorCount.get();
 
-        // cleaning up
-        ioLoopThreadPool.shutdown();
+        while (!allDone.await(1, TimeUnit.SECONDS)) {
+            final int newRequestsScheduled = requestsScheduled.get();
+            final int newInitiatedReqCount = initiatedRequestsCount.get();
+            final int newProcessedReqCount = processedRequestsCount.get();
+            final int newErrorCount = errorCount.get();
+            final long now = System.currentTimeMillis();
+            final int elapsedSec = Ints.checkedCast(TimeUnit.MILLISECONDS.toSeconds(now - startTs));
+
+            logger.info(String.format("es: %3d, rsd: %4d, irps: %4d, rps: %4d, cer: %5d, err: %5d, rpts: %4d, ost: %4d, cnd %5d, wrn %5d, rd %5d",
+                    elapsedSec,
+                    (newRequestsScheduled - lastRequestsScheduled),
+                    (newInitiatedReqCount - lastInitiatedReqCount),
+                    (newProcessedReqCount - lastProcessedReqCount),
+                    currentlyExecutingRequests.size(),
+                    (newErrorCount - lastErrorCount),
+                    requestsPendingToSend.size(),
+                    openSocketTookMsMax.getAndSet(0),
+                    connectedCount.get(),
+                    writtenCount.get(),
+                    readCount.get()));
+            lastRequestsScheduled = newRequestsScheduled;
+            lastInitiatedReqCount = newInitiatedReqCount;
+            lastProcessedReqCount = newProcessedReqCount;
+            lastErrorCount = newErrorCount;
+        }
+
+        final int errorCountValue = errorCount.get();
+        if (errorCountValue > 0)
+            logger.error("total number of errors: {}", errorCountValue);
     }
 
-    private static class ConnectionData {
-        public ByteBuffer readBuffer = ByteBuffer.allocate(8192);
+    private static class RequestData {
+        public ByteBuffer readBuffer = ByteBuffer.allocate(bufferSize);
+        public CharBuffer creadBuffer = CharBuffer.allocate(bufferSize);
         public SocketChannel socketChannel;
-        public ByteBuffer writeBuffer = tempaterRequestBuffer.asReadOnlyBuffer();
+        public ByteBuffer writeBuffer = tempRequestBuffer.asReadOnlyBuffer();
+        public AtomicInteger readBytes = new AtomicInteger();
+        public CharsetDecoder decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPLACE).onUnmappableCharacter(CodingErrorAction.REPLACE);
+
+        public void processReadBuffer() {
+            readBuffer.flip();
+            decoder.decode(readBuffer, creadBuffer, false);
+        }
+
+        public void finishRead() throws IOException {
+            readBuffer.flip();
+            decoder.decode(readBuffer, creadBuffer, true);
+            creadBuffer.flip();
+            if (!creadBuffer.toString().contains(successData)) {
+                throw new IOException("possible connection reset");
+            }
+        }
+    }
+
+    private static boolean setIfGreater(AtomicLong container, long value) {
+        while (true) {
+            long current = container.get();
+            if (value <= current)
+                return false;
+            if (container.compareAndSet(current, value))
+                return true;
+        }
     }
 }
