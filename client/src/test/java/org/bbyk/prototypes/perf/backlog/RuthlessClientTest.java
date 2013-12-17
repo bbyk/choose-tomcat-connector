@@ -1,5 +1,6 @@
 package org.bbyk.prototypes.perf.backlog;
 
+import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.primitives.Ints;
@@ -20,8 +21,10 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
@@ -53,6 +56,8 @@ public class RuthlessClientTest {
     private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);
     private final static long tickIntervalMs = Integer.getInteger("tickIntervalMs", 10);
     private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
+    private final static boolean slowSend = Boolean.getBoolean("slowSend");
+    private final static int slowSendPause = Integer.getInteger("slowSendPause", 100);
 
     @Test
     public void stableRateConcurrentUsers() throws Exception {
@@ -94,6 +99,12 @@ public class RuthlessClientTest {
 
         for (int ci = 0; ci < numOfCpus; ci++) {
             final int selectorId = ci;
+            final PriorityQueue<TimeCallback> timers = new PriorityQueue<TimeCallback>(11, new Comparator<TimeCallback>() {
+                @Override
+                public int compare(TimeCallback o1, TimeCallback o2) {
+                    return o1.scheduledAt < o2.scheduledAt ? -1 : (o1.scheduledAt == o2.scheduledAt ? 0 : 1);
+                }
+            });
             ioLoopThreadPool.execute(new Runnable() {
                 @Override
                 public void run() {
@@ -113,10 +124,14 @@ public class RuthlessClientTest {
                         //noinspection InfiniteLoopStatement
                         while (true) {
                             final int selected = selector.select();
-                            final Set<SelectionKey> selectionKeys = selector.selectedKeys();
 
                             if (logger.isDebugEnabled())
                                 logger.debug("selected: " + selected);
+
+                            final Set<SelectionKey> selectionKeys = selector.selectedKeys();
+
+                            if (logger.isDebugEnabled())
+                                logger.debug("selected keys: " + selectionKeys.size());
 
                             newRequests.clear();
                             requestsPendingToSend.drainTo(newRequests);
@@ -136,8 +151,17 @@ public class RuthlessClientTest {
                                 }
                             }
 
-                            if (logger.isDebugEnabled())
-                                logger.debug("selected keys: " + selectionKeys.size());
+                            // run pending callbacks
+                            while (true) {
+                                final TimeCallback callback = timers.peek();
+                                if (callback == null)
+                                    break;
+                                if (callback.scheduledAt > System.currentTimeMillis())
+                                    break;
+                                
+                                timers.poll(); // remove it
+                                callback.callback.run();
+                            }
 
                             final Iterator<SelectionKey> selectionKeyIterator = selectionKeys.iterator();
                             while (selectionKeyIterator.hasNext()) {
@@ -192,12 +216,39 @@ public class RuthlessClientTest {
                                 } else if (selectionKey.isWritable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
                                     try {
-                                        final int write = requestData.socketChannel.write(requestData.writeBuffer);
-                                        if (logger.isDebugEnabled())
-                                            logger.debug("written bytes: " + write);
+                                        if (slowSend) {
+                                            final TimeCallback timeCallback = new TimeCallback();
+                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowSendPause;
+                                            timeCallback.callback = new Runnable() {
+                                                @Override
+                                                public void run() {
+                                                    try {
+                                                        final int write = requestData.socketChannel.write(requestData.writeBuffer);
+                                                        if (logger.isDebugEnabled())
+                                                            logger.debug("written bytes: " + write);
 
-                                        writtenCount.incrementAndGet();
-                                        selectionKey.interestOps(SelectionKey.OP_READ);
+                                                        writtenCount.incrementAndGet();
+                                                        selectionKey.interestOps(SelectionKey.OP_READ);
+                                                    } catch (IOException e) {
+                                                        if (verboseErrors)
+                                                            logger.error("error writing to socket", e);
+                                                        try {
+                                                            closeKeyOnError(selectionKey);
+                                                        } catch (IOException e1) {
+                                                            throw Throwables.propagate(e1);
+                                                        }
+                                                    }
+                                                }
+                                            };
+                                            timers.add(timeCallback);
+                                        } else {
+                                            final int write = requestData.socketChannel.write(requestData.writeBuffer);
+                                            if (logger.isDebugEnabled())
+                                                logger.debug("written bytes: " + write);
+
+                                            writtenCount.incrementAndGet();
+                                            selectionKey.interestOps(SelectionKey.OP_READ);
+                                        }
                                     } catch (IOException e) {
                                         if (verboseErrors)
                                             logger.error("error writing to socket", e);
@@ -392,5 +443,10 @@ public class RuthlessClientTest {
             if (container.compareAndSet(current, value))
                 return true;
         }
+    }
+
+    private static class TimeCallback {
+        public long scheduledAt;
+        public Runnable callback;
     }
 }
