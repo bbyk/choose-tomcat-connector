@@ -59,6 +59,11 @@
                     <hostName>localhost</hostName>
                     <port>8080</port>
                     <update>true</update>
+                    <systemProperties>
+                        <com.sun.management.jmxremote.port>13380</com.sun.management.jmxremote.port>
+                        <com.sun.management.jmxremote.ssl>false</com.sun.management.jmxremote.ssl>
+                        <com.sun.management.jmxremote.authenticate>false</com.sun.management.jmxremote.authenticate>
+                    </systemProperties>
                 </configuration>
             </plugin>
         </plugins>
