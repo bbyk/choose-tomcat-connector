@@ -21,6 +21,7 @@
         <servlet.version>2.5</servlet.version>
         <maven.compiler.version>2.5</maven.compiler.version>
         <java.version>1.6</java.version>
+        <server.xml.loc>${basedir}/extras/tomcatConf/server-bio.xml</server.xml.loc>
     </properties>
 
     <build>
@@ -53,7 +54,7 @@
 
                     <!-- specific to the app and may be changed -->
                     <!-- http://tomcat.apache.org/maven-plugin-2.1-SNAPSHOT/tomcat7-maven-plugin/run-war-mojo.html -->
-                    <serverXml>${basedir}/extras/tomcatConf/server.xml</serverXml>
+                    <serverXml>${server.xml.loc}</serverXml>
                     <configurationDir>${project.build.directory}/tomcat</configurationDir>
                     <uriEncoding>UTF-8</uriEncoding>
                     <hostName>localhost</hostName>
@@ -95,4 +96,19 @@
             <version>${cglib.version}</version>
         </dependency>
     </dependencies>
+    
+    <profiles>
+        <profile>
+            <id>nio</id>
+            <properties>
+                <server.xml.loc>${basedir}/extras/tomcatConf/server-nio.xml</server.xml.loc>
+            </properties>
+        </profile>
+        <profile>
+            <id>bio</id>
+            <properties>
+                <server.xml.loc>${basedir}/extras/tomcatConf/server-bio.xml</server.xml.loc>
+            </properties>
+        </profile>
+    </profiles>
 </project>
