@@ -325,6 +325,8 @@ public class RuthlessClientTest {
                             socketChannel.socket().setSendBufferSize(bufferSize);
                             socketChannel.socket().setReceiveBufferSize(bufferSize);
                             socketChannel.socket().setTcpNoDelay(true);
+                            // socketChannel.socket().setSoLinger(false);
+                            // socketChannel.socket().setReuseAddress(true)
 
                             final RequestData requestData = new RequestData();
                             requestData.socketChannel = socketChannel;
