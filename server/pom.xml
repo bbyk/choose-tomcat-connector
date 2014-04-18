@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.bbyk.prototypes</groupId>
-    <artifactId>perf.backlog.server</artifactId>
+    <artifactId>pperf.tomcat.connector.server</artifactId>
     <version>1.0-SNAPSHOT</version>
     <packaging>war</packaging>
 
