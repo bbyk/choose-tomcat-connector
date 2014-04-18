@@ -50,7 +50,7 @@ public class RuthlessClientTest {
     private final static int serverPort = Integer.getInteger("serverPort", 8081);
     private final static InetSocketAddress serverAddr = new InetSocketAddress(serverHost, serverPort);
     private final static String endPointPath = System.getProperty("endPointPath", "/server/endpoint");
-    private final static ByteBuffer tempRequestBuffer = encoding.encode(CharBuffer.wrap("GET " + endPointPath + " HTTP/1.0\r\n\r\n"));
+    private final static ByteBuffer tempRequestBuffer = encoding.encode(CharBuffer.wrap("GET " + endPointPath + "?sleepTimeMs=250&echoContent=success HTTP/1.0\r\n\r\n"));
     private final static String successData = System.getProperty("successData", "success");
     private final static int requestsPerSecond = Integer.getInteger("requestsPerSecond", 1600);
     private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);

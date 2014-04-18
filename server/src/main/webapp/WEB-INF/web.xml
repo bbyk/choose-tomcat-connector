@@ -5,20 +5,14 @@
 		  http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd"
            version="2.5">
     <servlet>
-        <servlet-name>spring-webmvc</servlet-name>
-        <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
-        <init-param>
-            <param-name>contextConfigLocation</param-name>
-            <param-value>
-                classpath:spring/servlet.xml
-            </param-value>
-        </init-param>
+        <servlet-name>echo</servlet-name>
+        <servlet-class>org.bbyk.prototypes.perf.backlog.EchoResponseServlet</servlet-class>
         <load-on-startup>50</load-on-startup>
     </servlet>
 
     <!-- Standard Action Servlet Mapping -->
     <servlet-mapping>
-        <servlet-name>spring-webmvc</servlet-name>
-        <url-pattern>/</url-pattern>
+        <servlet-name>echo</servlet-name>
+        <url-pattern>/endpoint</url-pattern>
     </servlet-mapping>
 </web-app>
