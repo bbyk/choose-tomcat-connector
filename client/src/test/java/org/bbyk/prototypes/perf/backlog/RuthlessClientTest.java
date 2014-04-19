@@ -209,51 +209,36 @@ public class RuthlessClientTest {
                                     }
                                 } else if (selectionKey.isWritable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
-                                    try {
-                                        if (slowSendStart) {
-                                            final TimeCallback timeCallback = new TimeCallback();
-                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowSendStartPauseMs;
-                                            timeCallback.callback = new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    try {
-                                                        int write = requestData.socketChannel.write(requestData.firstLineWriteBuffer);
-                                                        if (logger.isDebugEnabled())
-                                                            logger.debug("#1 written bytes: " + write);
-                                                        write = requestData.socketChannel.write(requestData.headersWriteBuffer);
-                                                        if (logger.isDebugEnabled())
-                                                            logger.debug("#2 written bytes: " + write);
-                                                        write = requestData.socketChannel.write(requestData.payloadWriteBuffer);
-                                                        if (logger.isDebugEnabled())
-                                                            logger.debug("#3 written bytes: " + write);
+                                    final Runnable writeClosure = new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            try {
+                                                final ByteBuffer[] byteBuffers = {requestData.firstLineWriteBuffer, requestData.headersWriteBuffer, requestData.payloadWriteBuffer};
+                                                long write = requestData.socketChannel.write(byteBuffers);
+                                                if (logger.isDebugEnabled())
+                                                    logger.debug("#1 written bytes: " + write);
 
-                                                        writtenCount.incrementAndGet();
-                                                        selectionKey.interestOps(SelectionKey.OP_READ);
-                                                    } catch (IOException e) {
-                                                        if (verboseErrors)
-                                                            logger.error("error writing to socket", e);
-                                                        try {
-                                                            closeKeyOnError(selectionKey);
-                                                        } catch (IOException e1) {
-                                                            throw Throwables.propagate(e1);
-                                                        }
-                                                    }
+                                                writtenCount.incrementAndGet();
+                                                selectionKey.interestOps(SelectionKey.OP_READ);
+                                            } catch (IOException e) {
+                                                if (verboseErrors)
+                                                    logger.error("error writing to socket", e);
+                                                try {
+                                                    closeKeyOnError(selectionKey);
+                                                } catch (IOException e1) {
+                                                    throw Throwables.propagate(e1);
                                                 }
-                                            };
-                                            timers.add(timeCallback);
-                                        } else {
-                                            final ByteBuffer[] byteBuffers = {requestData.firstLineWriteBuffer, requestData.headersWriteBuffer, requestData.payloadWriteBuffer};
-                                            long write = requestData.socketChannel.write(byteBuffers);
-                                            if (logger.isDebugEnabled())
-                                                logger.debug("#1 written bytes: " + write);
-
-                                            writtenCount.incrementAndGet();
-                                            selectionKey.interestOps(SelectionKey.OP_READ);
+                                            }
                                         }
-                                    } catch (IOException e) {
-                                        if (verboseErrors)
-                                            logger.error("error writing to socket", e);
-                                        closeKeyOnError(selectionKey);
+                                    };
+
+                                    if (slowSendStart) {
+                                        final TimeCallback timeCallback = new TimeCallback();
+                                        timeCallback.scheduledAt = System.currentTimeMillis() + slowSendStartPauseMs;
+                                        timeCallback.callback = writeClosure;
+                                        timers.add(timeCallback);
+                                    } else {
+                                        writeClosure.run();
                                     }
                                 }
                             }
