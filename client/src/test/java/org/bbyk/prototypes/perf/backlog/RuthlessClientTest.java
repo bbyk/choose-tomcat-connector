@@ -40,15 +40,16 @@ public class RuthlessClientTest {
     private final static int serverPort = Integer.getInteger("serverPort", 8081);
     private final static InetSocketAddress serverAddr = new InetSocketAddress(serverHost, serverPort);
     private final static String endPointPath = System.getProperty("endPointPath", "/server/endpoint");
-    private final static ByteBuffer firstLineRequestBuffer = encoding.encode(CharBuffer.wrap("POST " + endPointPath + " HTTP/1.1\r\n"));
+    private final static ByteBuffer requestLineWriteBuffer = encoding.encode(CharBuffer.wrap("POST " + endPointPath + " HTTP/1.1\r\n"));
+    private final static int postPayloadSize = Integer.getInteger("postPayloadSize", 4 * 1024);
+    private final static ByteBuffer headersWriteBuffer = encoding.encode(CharBuffer.wrap("Host: " + serverHost + ":" + serverPort + "\r\nContent-Length: " + postPayloadSize + "\r\n\r\n"));
     private final static int requestsPerSecond = Integer.getInteger("requestsPerSecond", 1600);
     private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);
     private final static long tickIntervalMs = Integer.getInteger("tickIntervalMs", 10);
     private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
     private final static boolean slowSendStart = Boolean.getBoolean("slowSendStart");
     private final static int slowSendStartPauseMs = Integer.getInteger("slowSendStartPauseMs", 100);
-    private final static int postPayloadSize = Integer.getInteger("postPayloadSize", 4 * 1024);
-    private final static CharBuffer lineSeparatorCharBuffer = (CharBuffer)CharBuffer.wrap("\r\n");
+    private final static CharBuffer lineSeparatorCharBuffer = CharBuffer.wrap("\r\n");
 
     @Test
     public void stableRateConcurrentUsers() throws Exception {
@@ -188,9 +189,9 @@ public class RuthlessClientTest {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
                                     try {
                                         // The buffer into which we'll read data when it's available
-                                        requestData.readBuffer.clear();
+                                        requestData.responseReadBuffer.clear();
 
-                                        final int read = requestData.socketChannel.read(requestData.readBuffer);
+                                        final int read = requestData.socketChannel.read(requestData.responseReadBuffer);
                                         if (logger.isDebugEnabled())
                                             logger.debug("read bytes: " + read);
                                         if (read == -1) {
@@ -213,7 +214,7 @@ public class RuthlessClientTest {
                                         @Override
                                         public void run() {
                                             try {
-                                                final ByteBuffer[] byteBuffers = {requestData.firstLineWriteBuffer, requestData.headersWriteBuffer, requestData.payloadWriteBuffer};
+                                                final ByteBuffer[] byteBuffers = {requestLineWriteBuffer.asReadOnlyBuffer(), headersWriteBuffer.asReadOnlyBuffer(), requestData.payloadWriteBuffer};
                                                 long write = requestData.socketChannel.write(byteBuffers);
                                                 if (logger.isDebugEnabled())
                                                     logger.debug("#1 written bytes: " + write);
@@ -402,71 +403,65 @@ public class RuthlessClientTest {
 
     private static class RequestData {
         public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(bufferSize);
-        public ByteBuffer readBuffer = ByteBuffer.allocate(bufferSize);
-        public CharBuffer headersBuffer = CharBuffer.allocate(bufferSize);
+        public ByteBuffer responseReadBuffer = ByteBuffer.allocate(bufferSize);
+        public CharBuffer currentHeaderCharBuffer = CharBuffer.allocate(bufferSize);
         public SocketChannel socketChannel;
-        public ByteBuffer firstLineWriteBuffer = firstLineRequestBuffer.asReadOnlyBuffer();
-        public ByteBuffer headersWriteBuffer;
         public ByteBuffer payloadWriteBuffer;
-        private byte[] payload;
         public AtomicInteger readBytes = new AtomicInteger();
         public CharsetDecoder decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPLACE).onUnmappableCharacter(CodingErrorAction.REPLACE);
-        private ByteBuffer lineSeparatorBuffer = encoding.encode(lineSeparatorCharBuffer.duplicate());
+        private ByteBuffer lineSeparatorBuffer = encoding.encode(lineSeparatorCharBuffer.asReadOnlyBuffer());
         boolean inProcessingHeader = true;
 
         private RequestData(byte[] payload) {
-            readBuffer.mark();
-            this.payload = payload;
-            headersWriteBuffer = encoding.encode(CharBuffer.wrap("Host: " + serverHost + ":" + serverPort + "\r\nContent-Length: " + payload.length + "\r\n\r\n"));
             payloadWriteBuffer = ByteBuffer.wrap(payload);
         }
 
         public void processReadBuffer() {
             if (!inProcessingHeader) {
-                readBuffer.flip();
-                payloadReadBuffer.put(readBuffer);
-                readBuffer.clear();
+                responseReadBuffer.flip();
+                payloadReadBuffer.put(responseReadBuffer);
+                responseReadBuffer.clear();
             }
 
-            readBuffer.flip();
+            responseReadBuffer.flip();
             int mark = 0;
 
-            while (readBuffer.hasRemaining()) {
-                final byte currentByte = readBuffer.get();
+            while (responseReadBuffer.hasRemaining()) {
+                final byte currentByte = responseReadBuffer.get();
                 if (currentByte == lineSeparatorBuffer.get(lineSeparatorBuffer.position())) {
                     lineSeparatorBuffer.get(); // advance pointer in the lineseparator buffer.
                     if (!lineSeparatorBuffer.hasRemaining()) {
                         lineSeparatorBuffer.flip();
 
-                        final int limitToRestore = readBuffer.limit();
+                        final int limitToRestore = responseReadBuffer.limit();
                         try {
-                            readBuffer.limit(readBuffer.position());
-                            readBuffer.position(mark);
-                            decoder.decode(readBuffer, headersBuffer, true);
-                            mark = readBuffer.position();
+                            responseReadBuffer.limit(responseReadBuffer.position());
+                            responseReadBuffer.position(mark);
+                            decoder.decode(responseReadBuffer, currentHeaderCharBuffer, true);
+                            mark = responseReadBuffer.position();
                         } finally {
-                            readBuffer.limit(limitToRestore);
+                            responseReadBuffer.limit(limitToRestore);
                         }
 
-                        headersBuffer.flip();
+                        currentHeaderCharBuffer.flip();
                         
                         // analyse the header if it's empty string
-                        if (headersBuffer.equals(lineSeparatorCharBuffer)) {
+                        if (currentHeaderCharBuffer.equals(lineSeparatorCharBuffer)) {
                             inProcessingHeader = false;
-                            payloadReadBuffer.put(readBuffer);
-                            readBuffer.clear();
+                            payloadReadBuffer.put(responseReadBuffer);
+                            responseReadBuffer.clear();
                             return;
                         }
                         
-                        headersBuffer.clear();
+                        currentHeaderCharBuffer.clear();
                     }
                 }
             }
 
-            readBuffer.position(mark);
-            if (readBuffer.hasRemaining())
-                decoder.decode(readBuffer, headersBuffer, false);
-            readBuffer.clear();
+            responseReadBuffer.position(mark);
+            if (responseReadBuffer.hasRemaining())
+                decoder.decode(responseReadBuffer, currentHeaderCharBuffer, false);
+            responseReadBuffer.clear();
         }
 
         public void finishRead() throws IOException {
