@@ -33,7 +33,8 @@ public class RuthlessClientTest {
     private static final int MILLISECONDS_PER_SECOND = 1000;
 
     private final static Logger logger = LoggerFactory.getLogger(RuthlessClientTest.class);
-    private final static int bufferSize = Integer.getInteger("bufferSize", 8192);
+    private final static int sendBufferSize = Integer.getInteger("sendBufferSize", 8192);
+    private final static int recvBufferSize = Integer.getInteger("recvBufferSize", 8192);
     private final static int numOfCpus = Integer.getInteger("numOfCpus", Runtime.getRuntime().availableProcessors());
     private final static Charset encoding = Charset.forName("utf8");
     private final static String serverHost = System.getProperty("serverHost", "localhost");
@@ -49,6 +50,8 @@ public class RuthlessClientTest {
     private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
     private final static boolean slowSendStart = Boolean.getBoolean("slowSendStart");
     private final static int slowSendStartPauseMs = Integer.getInteger("slowSendStartPauseMs", 100);
+    private final static boolean slowRead = Boolean.getBoolean("slowRead");
+    private final static int slowReadPauseMs = Integer.getInteger("slowReadPauseMs", 100);
     private final static CharBuffer lineSeparatorCharBuffer = CharBuffer.wrap("\r\n");
 
     @Test
@@ -309,8 +312,8 @@ public class RuthlessClientTest {
                                 logger.debug(String.format("default buffer sizes: %d %d", socketChannel.socket().getSendBufferSize(), socketChannel.socket().getReceiveBufferSize()));
 
                             socketChannel.configureBlocking(false);
-                            socketChannel.socket().setSendBufferSize(bufferSize);
-                            socketChannel.socket().setReceiveBufferSize(bufferSize);
+                            socketChannel.socket().setSendBufferSize(sendBufferSize);
+                            socketChannel.socket().setReceiveBufferSize(recvBufferSize);
                             socketChannel.socket().setTcpNoDelay(true);
                             // socketChannel.socket().setSoLinger(false);
                             // socketChannel.socket().setReuseAddress(true)
@@ -344,7 +347,7 @@ public class RuthlessClientTest {
         if (logger.isInfoEnabled()) {
             final SocketChannel tmpSocketChannel = SocketChannel.open();
             logger.info(String.format("default send/recv buffer sizes: %d %d", tmpSocketChannel.socket().getSendBufferSize(), tmpSocketChannel.socket().getReceiveBufferSize()));
-            logger.info(String.format("current send/recv buffer sizes: %d %d", bufferSize, bufferSize));
+            logger.info(String.format("current send/recv buffer sizes: %d %d", sendBufferSize, recvBufferSize));
             logger.info(String.format("default tcpNoDelay: %s", tmpSocketChannel.socket().getTcpNoDelay()));
             logger.info(String.format("current tcpNoDelay: %s", true));
 
@@ -402,9 +405,9 @@ public class RuthlessClientTest {
     }
 
     private static class RequestData {
-        public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(bufferSize);
-        public ByteBuffer responseReadBuffer = ByteBuffer.allocate(bufferSize);
-        public CharBuffer currentHeaderCharBuffer = CharBuffer.allocate(bufferSize);
+        public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(postPayloadSize);
+        public ByteBuffer responseReadBuffer = ByteBuffer.allocate(recvBufferSize);
+        public CharBuffer currentHeaderCharBuffer = CharBuffer.allocate(1024);
         public SocketChannel socketChannel;
         public ByteBuffer payloadWriteBuffer;
         public AtomicInteger readBytes = new AtomicInteger();
@@ -418,6 +421,13 @@ public class RuthlessClientTest {
 
         public void processReadBuffer() {
             if (!inProcessingHeader) {
+                if (slowRead) {
+                    try {
+                        Thread.sleep(slowReadPauseMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
                 responseReadBuffer.flip();
                 payloadReadBuffer.put(responseReadBuffer);
                 responseReadBuffer.clear();
@@ -444,7 +454,7 @@ public class RuthlessClientTest {
                         }
 
                         currentHeaderCharBuffer.flip();
-                        
+
                         // analyse the header if it's empty string
                         if (currentHeaderCharBuffer.equals(lineSeparatorCharBuffer)) {
                             inProcessingHeader = false;
@@ -452,7 +462,7 @@ public class RuthlessClientTest {
                             responseReadBuffer.clear();
                             return;
                         }
-                        
+
                         currentHeaderCharBuffer.clear();
                     }
                 }
