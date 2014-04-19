@@ -19,6 +19,7 @@
         <tomcat.serverId>ViharTomcatServer</tomcat.serverId>
         <tomcat.serverUrl>http://localhost:8080/manager/text</tomcat.serverUrl>
         <servlet.version>2.5</servlet.version>
+        <commons-io.version>2.4</commons-io.version>
         <maven.compiler.version>2.5</maven.compiler.version>
         <java.version>1.6</java.version>
         <server.xml.loc>${basedir}/extras/tomcatConf/server-bio.xml</server.xml.loc>
@@ -77,6 +78,11 @@
             <artifactId>servlet-api</artifactId>
             <version>${servlet.version}</version>
             <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>${commons-io.version}</version>
         </dependency>
     </dependencies>
     

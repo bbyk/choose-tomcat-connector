@@ -21,18 +21,8 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.List;
-import java.util.PriorityQueue;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -50,18 +40,22 @@ public class RuthlessClientTest {
     private final static int serverPort = Integer.getInteger("serverPort", 8081);
     private final static InetSocketAddress serverAddr = new InetSocketAddress(serverHost, serverPort);
     private final static String endPointPath = System.getProperty("endPointPath", "/server/endpoint");
-    private final static ByteBuffer tempRequestBuffer = encoding.encode(CharBuffer.wrap("GET " + endPointPath + "?sleepTimeMs=250&echoContent=success HTTP/1.0\r\n\r\n"));
-    private final static String successData = System.getProperty("successData", "success");
+    private final static ByteBuffer firstLineRequestBuffer = encoding.encode(CharBuffer.wrap("POST " + endPointPath + " HTTP/1.1\r\n"));
     private final static int requestsPerSecond = Integer.getInteger("requestsPerSecond", 1600);
     private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);
     private final static long tickIntervalMs = Integer.getInteger("tickIntervalMs", 10);
     private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
-    private final static boolean slowSend = Boolean.getBoolean("slowSend");
-    private final static int slowSendPause = Integer.getInteger("slowSendPause", 100);
+    private final static boolean slowSendStart = Boolean.getBoolean("slowSendStart");
+    private final static int slowSendStartPauseMs = Integer.getInteger("slowSendStartPauseMs", 100);
+    private final static int postPayloadSize = Integer.getInteger("postPayloadSize", 4 * 1024);
+    private final static CharBuffer lineSeparatorCharBuffer = (CharBuffer)CharBuffer.wrap("\r\n");
 
     @Test
     public void stableRateConcurrentUsers() throws Exception {
-        // epoll or kqueue is behind
+        // generate random post payload
+        final byte[] postPayLoad = new byte[postPayloadSize];
+        new Random().nextBytes(postPayLoad);
+
         final int numberOfRequests = requestsPerSecond * testDurationInSeconds;
         logger.info("number of requests {}", numberOfRequests);
         final CountDownLatch allDone = new CountDownLatch(numberOfRequests);
@@ -158,7 +152,7 @@ public class RuthlessClientTest {
                                     break;
                                 if (callback.scheduledAt > System.currentTimeMillis())
                                     break;
-                                
+
                                 timers.poll(); // remove it
                                 callback.callback.run();
                             }
@@ -216,16 +210,22 @@ public class RuthlessClientTest {
                                 } else if (selectionKey.isWritable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
                                     try {
-                                        if (slowSend) {
+                                        if (slowSendStart) {
                                             final TimeCallback timeCallback = new TimeCallback();
-                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowSendPause;
+                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowSendStartPauseMs;
                                             timeCallback.callback = new Runnable() {
                                                 @Override
                                                 public void run() {
                                                     try {
-                                                        final int write = requestData.socketChannel.write(requestData.writeBuffer);
+                                                        int write = requestData.socketChannel.write(requestData.firstLineWriteBuffer);
                                                         if (logger.isDebugEnabled())
-                                                            logger.debug("written bytes: " + write);
+                                                            logger.debug("#1 written bytes: " + write);
+                                                        write = requestData.socketChannel.write(requestData.headersWriteBuffer);
+                                                        if (logger.isDebugEnabled())
+                                                            logger.debug("#2 written bytes: " + write);
+                                                        write = requestData.socketChannel.write(requestData.payloadWriteBuffer);
+                                                        if (logger.isDebugEnabled())
+                                                            logger.debug("#3 written bytes: " + write);
 
                                                         writtenCount.incrementAndGet();
                                                         selectionKey.interestOps(SelectionKey.OP_READ);
@@ -242,9 +242,10 @@ public class RuthlessClientTest {
                                             };
                                             timers.add(timeCallback);
                                         } else {
-                                            final int write = requestData.socketChannel.write(requestData.writeBuffer);
+                                            final ByteBuffer[] byteBuffers = {requestData.firstLineWriteBuffer, requestData.headersWriteBuffer, requestData.payloadWriteBuffer};
+                                            long write = requestData.socketChannel.write(byteBuffers);
                                             if (logger.isDebugEnabled())
-                                                logger.debug("written bytes: " + write);
+                                                logger.debug("#1 written bytes: " + write);
 
                                             writtenCount.incrementAndGet();
                                             selectionKey.interestOps(SelectionKey.OP_READ);
@@ -328,7 +329,7 @@ public class RuthlessClientTest {
                             // socketChannel.socket().setSoLinger(false);
                             // socketChannel.socket().setReuseAddress(true)
 
-                            final RequestData requestData = new RequestData();
+                            final RequestData requestData = new RequestData(postPayLoad);
                             requestData.socketChannel = socketChannel;
 
                             requestsPendingToSend.offer(requestData);
@@ -415,23 +416,82 @@ public class RuthlessClientTest {
     }
 
     private static class RequestData {
+        public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(bufferSize);
         public ByteBuffer readBuffer = ByteBuffer.allocate(bufferSize);
-        public CharBuffer creadBuffer = CharBuffer.allocate(bufferSize);
+        public CharBuffer headersBuffer = CharBuffer.allocate(bufferSize);
         public SocketChannel socketChannel;
-        public ByteBuffer writeBuffer = tempRequestBuffer.asReadOnlyBuffer();
+        public ByteBuffer firstLineWriteBuffer = firstLineRequestBuffer.asReadOnlyBuffer();
+        public ByteBuffer headersWriteBuffer;
+        public ByteBuffer payloadWriteBuffer;
+        private byte[] payload;
         public AtomicInteger readBytes = new AtomicInteger();
         public CharsetDecoder decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPLACE).onUnmappableCharacter(CodingErrorAction.REPLACE);
+        private ByteBuffer lineSeparatorBuffer = encoding.encode(lineSeparatorCharBuffer.duplicate());
+        boolean inProcessingHeader = true;
+
+        private RequestData(byte[] payload) {
+            readBuffer.mark();
+            this.payload = payload;
+            headersWriteBuffer = encoding.encode(CharBuffer.wrap("Host: " + serverHost + ":" + serverPort + "\r\nContent-Length: " + payload.length + "\r\n\r\n"));
+            payloadWriteBuffer = ByteBuffer.wrap(payload);
+        }
 
         public void processReadBuffer() {
+            if (!inProcessingHeader) {
+                readBuffer.flip();
+                payloadReadBuffer.put(readBuffer);
+                readBuffer.clear();
+            }
+
             readBuffer.flip();
-            decoder.decode(readBuffer, creadBuffer, false);
+            int mark = 0;
+
+            while (readBuffer.hasRemaining()) {
+                final byte currentByte = readBuffer.get();
+                if (currentByte == lineSeparatorBuffer.get(lineSeparatorBuffer.position())) {
+                    lineSeparatorBuffer.get(); // advance pointer in the lineseparator buffer.
+                    if (!lineSeparatorBuffer.hasRemaining()) {
+                        lineSeparatorBuffer.flip();
+
+                        final int limitToRestore = readBuffer.limit();
+                        try {
+                            readBuffer.limit(readBuffer.position());
+                            readBuffer.position(mark);
+                            decoder.decode(readBuffer, headersBuffer, true);
+                            mark = readBuffer.position();
+                        } finally {
+                            readBuffer.limit(limitToRestore);
+                        }
+
+                        headersBuffer.flip();
+                        
+                        // analyse the header if it's empty string
+                        if (headersBuffer.equals(lineSeparatorCharBuffer)) {
+                            inProcessingHeader = false;
+                            payloadReadBuffer.put(readBuffer);
+                            readBuffer.clear();
+                            return;
+                        }
+                        
+                        headersBuffer.clear();
+                    }
+                }
+            }
+
+            readBuffer.position(mark);
+            if (readBuffer.hasRemaining())
+                decoder.decode(readBuffer, headersBuffer, false);
+            readBuffer.clear();
         }
 
         public void finishRead() throws IOException {
-            readBuffer.flip();
-            decoder.decode(readBuffer, creadBuffer, true);
-            creadBuffer.flip();
-            if (!creadBuffer.toString().contains(successData)) {
+            payloadReadBuffer.flip();
+            payloadWriteBuffer.flip();
+
+            if (!payloadReadBuffer.equals(payloadWriteBuffer)) {
+                if (verboseErrors)
+                    logger.error("unexpected response: " + new String(payloadReadBuffer.array(), encoding));
+
                 throw new IOException("possible connection reset");
             }
         }
