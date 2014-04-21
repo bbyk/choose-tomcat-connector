@@ -125,16 +125,19 @@ public class RuthlessClientTest {
 
                         //noinspection InfiniteLoopStatement
                         while (true) {
-                            final int selected = selector.select();
+                            // run pending callbacks
+                            while (true) {
+                                final TimeCallback callback = timers.peek();
+                                if (callback == null)
+                                    break;
+                                if (callback.scheduledAt > System.currentTimeMillis())
+                                    break;
 
-                            if (logger.isDebugEnabled())
-                                logger.debug("selected: " + selected);
+                                timers.poll(); // remove it
+                                callback.callback.run();
+                            }
 
-                            final Set<SelectionKey> selectionKeys = selector.selectedKeys();
-
-                            if (logger.isDebugEnabled())
-                                logger.debug("selected keys: " + selectionKeys.size());
-
+                            // pending new requests
                             newRequests.clear();
                             requestsPendingToSend.drainTo(newRequests);
 
@@ -153,17 +156,14 @@ public class RuthlessClientTest {
                                 }
                             }
 
-                            // run pending callbacks
-                            while (true) {
-                                final TimeCallback callback = timers.peek();
-                                if (callback == null)
-                                    break;
-                                if (callback.scheduledAt > System.currentTimeMillis())
-                                    break;
-
-                                timers.poll(); // remove it
-                                callback.callback.run();
-                            }
+                            // now let's fetch what's changed (epoll / kqueue)
+                            final int selected = selector.select();
+                            if (logger.isDebugEnabled())
+                                logger.debug("selected: " + selected);
+                            
+                            final Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                            if (logger.isDebugEnabled())
+                                logger.debug("selected keys: " + selectionKeys.size());
 
                             final Iterator<SelectionKey> selectionKeyIterator = selectionKeys.iterator();
                             while (selectionKeyIterator.hasNext()) {
@@ -171,6 +171,8 @@ public class RuthlessClientTest {
                                 selectionKeyIterator.remove();
 
                                 if (!selectionKey.isValid()) {
+                                    if (verboseErrors)
+                                        logger.error("selection key is not valid");
                                     closeKeyOnError(selectionKey);
                                     continue;
                                 }
@@ -194,26 +196,48 @@ public class RuthlessClientTest {
                                     }
                                 } else if (selectionKey.isReadable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
-                                    try {
-                                        // The buffer into which we'll read data when it's available
-                                        requestData.responseReadBuffer.clear();
+                                    final Runnable readClosure = new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            try {
+                                                // The buffer into which we'll read data when it's available
+                                                requestData.responseReadBuffer.clear();
 
-                                        final int read = requestData.socketChannel.read(requestData.responseReadBuffer);
-                                        if (logger.isDebugEnabled())
-                                            logger.debug("read bytes: " + read);
-                                        if (read == -1) {
-                                            readCount.incrementAndGet();
-                                            closeKey(selectionKey);
-                                            requestData.finishRead();
-                                        } else {
-                                            requestData.readBytes.addAndGet(read);
-                                            requestData.processReadBuffer();
+                                                final int read = requestData.socketChannel.read(requestData.responseReadBuffer);
+                                                if (logger.isDebugEnabled())
+                                                    logger.debug("read bytes: " + read);
+                                                if (read == -1) {
+                                                    readCount.incrementAndGet();
+                                                    closeKey(selectionKey);
+                                                    requestData.finishRead();
+                                                } else {
+                                                    requestData.readBytes.addAndGet(read);
+                                                    requestData.processReadBuffer();
+                                                }
+                                            } catch (IOException e) {
+                                                if (verboseErrors)
+                                                    logger.error("error reading data", e);
+                                                try {
+                                                    closeKeyOnError(selectionKey);
+                                                } catch (IOException e1) {
+                                                    throw Throwables.propagate(e1);
+                                                }
+                                                currentlyExecutingRequests.remove(requestData);
+                                            } finally {
+                                                requestData.inScheduledSlowRead = false;
+                                            }
                                         }
-                                    } catch (IOException e) {
-                                        if (verboseErrors)
-                                            logger.error("error reading data", e);
-                                        closeKeyOnError(selectionKey);
-                                        currentlyExecutingRequests.remove(requestData);
+                                    };
+                                    if (slowRead) {
+                                        if (!requestData.inScheduledSlowRead) {
+                                            requestData.inScheduledSlowRead = true;
+                                            final TimeCallback timeCallback = new TimeCallback();
+                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowReadPauseMs;
+                                            timeCallback.callback = readClosure;
+                                            timers.add(timeCallback);
+                                        }
+                                    } else {
+                                        readClosure.run();
                                     }
                                 } else if (selectionKey.isWritable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
@@ -327,8 +351,8 @@ public class RuthlessClientTest {
                 private void closeKey(SelectionKey selectionKey) throws IOException {
                     final RequestData requestData = (RequestData) selectionKey.attachment();
                     allDone.countDown();
-                    selectionKey.channel().close();
                     selectionKey.cancel();
+                    selectionKey.channel().close();
                     currentlyExecutingRequests.remove(requestData);
                     processedRequestsCount.incrementAndGet();
                 }
@@ -468,6 +492,7 @@ public class RuthlessClientTest {
     }
 
     private static class RequestData {
+        public boolean inScheduledSlowRead;
         public RequestStage stage = RequestStage.CONNECTED;
         public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(postPayloadSize);
         public ByteBuffer responseReadBuffer = ByteBuffer.allocate(recvBufferSize);
@@ -521,13 +546,6 @@ public class RuthlessClientTest {
 
         public void processReadBuffer() {
             if (!inProcessingHeader) {
-                if (slowRead) {
-                    try {
-                        Thread.sleep(slowReadPauseMs);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
                 responseReadBuffer.flip();
                 payloadReadBuffer.put(responseReadBuffer);
                 responseReadBuffer.clear();
