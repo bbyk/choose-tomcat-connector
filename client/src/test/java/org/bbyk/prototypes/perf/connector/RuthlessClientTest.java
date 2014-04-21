@@ -211,7 +211,6 @@ public class RuthlessClientTest {
                                                     closeKey(selectionKey);
                                                     requestData.finishRead();
                                                 } else {
-                                                    requestData.readBytes.addAndGet(read);
                                                     requestData.processReadBuffer();
                                                 }
                                             } catch (IOException e) {
@@ -517,7 +516,6 @@ public class RuthlessClientTest {
         public CharBuffer currentHeaderCharBuffer = CharBuffer.allocate(1024);
         public SocketChannel socketChannel;
         public ByteBuffer payloadWriteBuffer;
-        public AtomicInteger readBytes = new AtomicInteger();
         public CharsetDecoder decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPLACE).onUnmappableCharacter(CodingErrorAction.REPLACE);
         private ByteBuffer lineSeparatorBuffer = encoding.encode(lineSeparatorCharBuffer.asReadOnlyBuffer());
         private ByteBuffer headersWriteBuffer = RuthlessClientTest.headersWriteBuffer.asReadOnlyBuffer();
