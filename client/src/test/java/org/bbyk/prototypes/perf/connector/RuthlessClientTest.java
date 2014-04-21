@@ -48,8 +48,12 @@ public class RuthlessClientTest {
     private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);
     private final static long tickIntervalMs = Integer.getInteger("tickIntervalMs", 10);
     private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
-    private final static boolean slowSendStart = Boolean.getBoolean("slowSendStart");
-    private final static int slowSendStartPauseMs = Integer.getInteger("slowSendStartPauseMs", 100);
+    private final static boolean slowFirstLine = Boolean.getBoolean("slowFirstLine");
+    private final static int slowFirstLinePauseMs = Integer.getInteger("slowFirstLinePauseMs", 100);
+    private final static boolean slowHeadersWrite = Boolean.getBoolean("slowHeadersWrite");
+    private final static int slowHeadersWritePauseMs = Integer.getInteger("slowHeadersWritePauseMs", 100);
+    private final static boolean slowPayloadWrite = Boolean.getBoolean("slowPayloadWrite");
+    private final static int slowPayloadWritePauseMs = Integer.getInteger("slowPayloadWritePauseMs", 100);
     private final static boolean slowRead = Boolean.getBoolean("slowRead");
     private final static int slowReadPauseMs = Integer.getInteger("slowReadPauseMs", 100);
     private final static CharBuffer lineSeparatorCharBuffer = CharBuffer.wrap("\r\n");
@@ -213,36 +217,95 @@ public class RuthlessClientTest {
                                     }
                                 } else if (selectionKey.isWritable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
-                                    final Runnable writeClosure = new Runnable() {
-                                        @Override
-                                        public void run() {
-                                            try {
-                                                final ByteBuffer[] byteBuffers = {requestLineWriteBuffer.asReadOnlyBuffer(), headersWriteBuffer.asReadOnlyBuffer(), requestData.payloadWriteBuffer};
-                                                long write = requestData.socketChannel.write(byteBuffers);
-                                                if (logger.isDebugEnabled())
-                                                    logger.debug("#1 written bytes: " + write);
-
-                                                writtenCount.incrementAndGet();
-                                                selectionKey.interestOps(SelectionKey.OP_READ);
-                                            } catch (IOException e) {
-                                                if (verboseErrors)
-                                                    logger.error("error writing to socket", e);
+                                    if (requestData.stage == RequestStage.CONNECTED) {
+                                        final Runnable writeClosure = new Runnable() {
+                                            @Override
+                                            public void run() {
                                                 try {
-                                                    closeKeyOnError(selectionKey);
-                                                } catch (IOException e1) {
-                                                    throw Throwables.propagate(e1);
+                                                    requestData.socketChannel.write(requestLineWriteBuffer.asReadOnlyBuffer());
+                                                    requestData.stage = RequestStage.SENT_REQUEST_LINE;
+                                                    selectionKey.interestOps(SelectionKey.OP_WRITE);
+                                                } catch (IOException e) {
+                                                    if (verboseErrors)
+                                                        logger.error("error writing request line to socket", e);
+                                                    try {
+                                                        closeKeyOnError(selectionKey);
+                                                    } catch (IOException e1) {
+                                                        throw Throwables.propagate(e1);
+                                                    }
                                                 }
                                             }
-                                        }
-                                    };
+                                        };
 
-                                    if (slowSendStart) {
-                                        final TimeCallback timeCallback = new TimeCallback();
-                                        timeCallback.scheduledAt = System.currentTimeMillis() + slowSendStartPauseMs;
-                                        timeCallback.callback = writeClosure;
-                                        timers.add(timeCallback);
-                                    } else {
-                                        writeClosure.run();
+                                        if (slowFirstLine) {
+                                            final TimeCallback timeCallback = new TimeCallback();
+                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowFirstLinePauseMs;
+                                            timeCallback.callback = writeClosure;
+                                            timers.add(timeCallback);
+                                        } else {
+                                            writeClosure.run();
+                                        }
+                                    } else if (requestData.stage == RequestStage.SENT_REQUEST_LINE) {
+                                        final Runnable writeClosure = new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                try {
+                                                    ByteBuffer bufferToSendWithOutWaiting = requestData.getCurrentHeadersSlice();
+                                                    requestData.socketChannel.write(bufferToSendWithOutWaiting);
+                                                    if (!requestData.hasMoreHeadersToSend())
+                                                        requestData.stage = RequestStage.SENT_HEADERS;
+                                                } catch (IOException e) {
+                                                    if (verboseErrors)
+                                                        logger.error("error writing headers to socket", e);
+                                                    try {
+                                                        closeKeyOnError(selectionKey);
+                                                    } catch (IOException e1) {
+                                                        throw Throwables.propagate(e1);
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        if (slowHeadersWrite) {
+                                            final TimeCallback timeCallback = new TimeCallback();
+                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowHeadersWritePauseMs;
+                                            timeCallback.callback = writeClosure;
+                                            timers.add(timeCallback);
+                                        } else {
+                                            writeClosure.run();
+                                        }
+                                    } else if (requestData.stage == RequestStage.SENT_HEADERS) {
+                                        final Runnable writeClosure = new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                try {
+                                                    ByteBuffer bufferToSendWithOutWaiting = requestData.getCurrentPayloadSlice();
+                                                    requestData.socketChannel.write(bufferToSendWithOutWaiting);
+                                                    if (!requestData.hasMorePayloadToSend()) {
+                                                        requestData.stage = RequestStage.SENT_PAYLOAD;
+
+                                                        selectionKey.interestOps(SelectionKey.OP_READ);
+                                                    }
+                                                } catch (IOException e) {
+                                                    if (verboseErrors)
+                                                        logger.error("error writing payload to socket", e);
+                                                    try {
+                                                        closeKeyOnError(selectionKey);
+                                                    } catch (IOException e1) {
+                                                        throw Throwables.propagate(e1);
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        if (slowPayloadWrite) {
+                                            final TimeCallback timeCallback = new TimeCallback();
+                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowPayloadWritePauseMs;
+                                            timeCallback.callback = writeClosure;
+                                            timers.add(timeCallback);
+                                        } else {
+                                            writeClosure.run();
+                                        }
+                                    } else if (requestData.stage == RequestStage.SENT_PAYLOAD) {
+                                        throw new IllegalStateException("should not get here");
                                     }
                                 }
                             }
@@ -405,6 +468,7 @@ public class RuthlessClientTest {
     }
 
     private static class RequestData {
+        public RequestStage stage = RequestStage.CONNECTED;
         public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(postPayloadSize);
         public ByteBuffer responseReadBuffer = ByteBuffer.allocate(recvBufferSize);
         public CharBuffer currentHeaderCharBuffer = CharBuffer.allocate(1024);
@@ -413,10 +477,46 @@ public class RuthlessClientTest {
         public AtomicInteger readBytes = new AtomicInteger();
         public CharsetDecoder decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPLACE).onUnmappableCharacter(CodingErrorAction.REPLACE);
         private ByteBuffer lineSeparatorBuffer = encoding.encode(lineSeparatorCharBuffer.asReadOnlyBuffer());
+        private ByteBuffer headersWriteBuffer = RuthlessClientTest.headersWriteBuffer.asReadOnlyBuffer();
+        private int headersWriteBufferLimit;
+        private int payloadWriteBufferLimit;
+
         boolean inProcessingHeader = true;
 
         private RequestData(byte[] payload) {
             payloadWriteBuffer = ByteBuffer.wrap(payload);
+        }
+
+        public boolean hasMoreHeadersToSend() {
+            return headersWriteBuffer.position() < RuthlessClientTest.headersWriteBuffer.limit();
+        }
+
+        public ByteBuffer getCurrentHeadersSlice() {
+            headersWriteBufferLimit = Math.min(RuthlessClientTest.headersWriteBuffer.limit(), headersWriteBufferLimit + sendBufferSize);
+
+            if (hasMoreHeadersToSend()) {
+                headersWriteBuffer.limit(headersWriteBufferLimit);
+
+                return headersWriteBuffer;
+            } else {
+                throw new IllegalStateException("should not get here");
+            }
+        }
+
+        public boolean hasMorePayloadToSend() {
+            return payloadWriteBuffer.position() < postPayloadSize;
+        }
+
+        public ByteBuffer getCurrentPayloadSlice() {
+            payloadWriteBufferLimit = Math.min(postPayloadSize, payloadWriteBufferLimit + sendBufferSize);
+
+            if (hasMorePayloadToSend()) {
+                payloadWriteBuffer.limit(payloadWriteBufferLimit);
+
+                return payloadWriteBuffer;
+            } else {
+                throw new IllegalStateException("should not get here");
+            }
         }
 
         public void processReadBuffer() {
@@ -500,5 +600,9 @@ public class RuthlessClientTest {
     private static class TimeCallback {
         public long scheduledAt;
         public Runnable callback;
+    }
+
+    private enum RequestStage {
+        CONNECTED, SENT_REQUEST_LINE, SENT_HEADERS, SENT_PAYLOAD
     }
 }
