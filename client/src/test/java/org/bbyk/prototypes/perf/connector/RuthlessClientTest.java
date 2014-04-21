@@ -224,13 +224,13 @@ public class RuthlessClientTest {
                                                 }
                                                 currentlyExecutingRequests.remove(requestData);
                                             } finally {
-                                                requestData.inScheduledSlowRead = false;
+                                                requestData.inScheduledSlowOp = false;
                                             }
                                         }
                                     };
                                     if (slowRead) {
-                                        if (!requestData.inScheduledSlowRead) {
-                                            requestData.inScheduledSlowRead = true;
+                                        if (!requestData.inScheduledSlowOp) {
+                                            requestData.inScheduledSlowOp = true;
                                             final TimeCallback timeCallback = new TimeCallback();
                                             timeCallback.scheduledAt = System.currentTimeMillis() + slowReadPauseMs;
                                             timeCallback.callback = readClosure;
@@ -258,14 +258,20 @@ public class RuthlessClientTest {
                                                         throw Throwables.propagate(e1);
                                                     }
                                                 }
+                                                finally {
+                                                    requestData.inScheduledSlowOp = false;
+                                                }
                                             }
                                         };
 
                                         if (slowFirstLine) {
-                                            final TimeCallback timeCallback = new TimeCallback();
-                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowFirstLinePauseMs;
-                                            timeCallback.callback = writeClosure;
-                                            timers.add(timeCallback);
+                                            if (!requestData.inScheduledSlowOp) {
+                                                requestData.inScheduledSlowOp = true;
+                                                final TimeCallback timeCallback = new TimeCallback();
+                                                timeCallback.scheduledAt = System.currentTimeMillis() + slowFirstLinePauseMs;
+                                                timeCallback.callback = writeClosure;
+                                                timers.add(timeCallback);
+                                            }
                                         } else {
                                             writeClosure.run();
                                         }
@@ -287,13 +293,19 @@ public class RuthlessClientTest {
                                                         throw Throwables.propagate(e1);
                                                     }
                                                 }
+                                                finally {
+                                                    requestData.inScheduledSlowOp = false;
+                                                }
                                             }
                                         };
                                         if (slowHeadersWrite) {
-                                            final TimeCallback timeCallback = new TimeCallback();
-                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowHeadersWritePauseMs;
-                                            timeCallback.callback = writeClosure;
-                                            timers.add(timeCallback);
+                                            if (!requestData.inScheduledSlowOp) {
+                                                requestData.inScheduledSlowOp = true;
+                                                final TimeCallback timeCallback = new TimeCallback();
+                                                timeCallback.scheduledAt = System.currentTimeMillis() + slowHeadersWritePauseMs;
+                                                timeCallback.callback = writeClosure;
+                                                timers.add(timeCallback);
+                                            }
                                         } else {
                                             writeClosure.run();
                                         }
@@ -318,13 +330,19 @@ public class RuthlessClientTest {
                                                         throw Throwables.propagate(e1);
                                                     }
                                                 }
+                                                finally {
+                                                    requestData.inScheduledSlowOp = false;
+                                                }
                                             }
                                         };
                                         if (slowPayloadWrite) {
-                                            final TimeCallback timeCallback = new TimeCallback();
-                                            timeCallback.scheduledAt = System.currentTimeMillis() + slowPayloadWritePauseMs;
-                                            timeCallback.callback = writeClosure;
-                                            timers.add(timeCallback);
+                                            if (!requestData.inScheduledSlowOp) {
+                                                requestData.inScheduledSlowOp = true;
+                                                final TimeCallback timeCallback = new TimeCallback();
+                                                timeCallback.scheduledAt = System.currentTimeMillis() + slowPayloadWritePauseMs;
+                                                timeCallback.callback = writeClosure;
+                                                timers.add(timeCallback);
+                                            }
                                         } else {
                                             writeClosure.run();
                                         }
@@ -492,7 +510,7 @@ public class RuthlessClientTest {
     }
 
     private static class RequestData {
-        public boolean inScheduledSlowRead;
+        public boolean inScheduledSlowOp;
         public RequestStage stage = RequestStage.CONNECTED;
         public ByteBuffer payloadReadBuffer = ByteBuffer.allocate(postPayloadSize);
         public ByteBuffer responseReadBuffer = ByteBuffer.allocate(recvBufferSize);
