@@ -1,4 +1,4 @@
-package org.bbyk.prototypes.perf.backlog;
+package org.bbyk.prototypes.perf.connector;
 
 import org.apache.commons.io.IOUtils;
 

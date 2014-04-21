@@ -1,4 +1,4 @@
-package org.bbyk.prototypes.perf.backlog;
+package org.bbyk.prototypes.perf.connector;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
