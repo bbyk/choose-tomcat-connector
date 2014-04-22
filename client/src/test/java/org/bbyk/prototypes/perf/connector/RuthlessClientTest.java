@@ -21,8 +21,18 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
+import java.util.PriorityQueue;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -41,15 +51,12 @@ public class RuthlessClientTest {
     private final static int serverPort = Integer.getInteger("serverPort", 8081);
     private final static InetSocketAddress serverAddr = new InetSocketAddress(serverHost, serverPort);
     private final static String endPointPath = System.getProperty("endPointPath", "/server/endpoint");
-    private final static ByteBuffer requestLineWriteBuffer = encoding.encode(CharBuffer.wrap("POST " + endPointPath + " HTTP/1.1\r\n"));
     private final static int postPayloadSize = Integer.getInteger("postPayloadSize", 4 * 1024);
-    private final static ByteBuffer headersWriteBuffer = encoding.encode(CharBuffer.wrap("Host: " + serverHost + ":" + serverPort + "\r\nContent-Length: " + postPayloadSize + "\r\n\r\n"));
+    private final static ByteBuffer headersWriteBuffer = encoding.encode(CharBuffer.wrap("POST " + endPointPath + " HTTP/1.1\r\nHost: " + serverHost + ":" + serverPort + "\r\nContent-Length: " + postPayloadSize + "\r\n\r\n"));
     private final static int requestsPerSecond = Integer.getInteger("requestsPerSecond", 1600);
     private final static int testDurationInSeconds = Integer.getInteger("testDuration", 100);
     private final static long tickIntervalMs = Integer.getInteger("tickIntervalMs", 10);
     private final static boolean verboseErrors = Boolean.getBoolean("verboseErrors");
-    private final static boolean slowFirstLine = Boolean.getBoolean("slowFirstLine");
-    private final static int slowFirstLinePauseMs = Integer.getInteger("slowFirstLinePauseMs", 100);
     private final static boolean slowHeadersWrite = Boolean.getBoolean("slowHeadersWrite");
     private final static int slowHeadersWritePauseMs = Integer.getInteger("slowHeadersWritePauseMs", 100);
     private final static boolean slowPayloadWrite = Boolean.getBoolean("slowPayloadWrite");
@@ -132,8 +139,7 @@ public class RuthlessClientTest {
                                 if (callback == null)
                                     break;
                                 final long delta = callback.scheduledAt - System.currentTimeMillis();
-                                if (delta > 0)
-                                {
+                                if (delta > 0) {
                                     timeTillNextCallback = delta;
                                     break;
                                 }
@@ -216,7 +222,7 @@ public class RuthlessClientTest {
                                                     readCount.incrementAndGet();
                                                     closeKey(selectionKey);
                                                     requestData.finishRead();
-                                                } 
+                                                }
                                             } catch (IOException e) {
                                                 if (verboseErrors)
                                                     logger.error("error reading data", e);
@@ -246,40 +252,6 @@ public class RuthlessClientTest {
                                 } else if (selectionKey.isWritable()) {
                                     final RequestData requestData = (RequestData) selectionKey.attachment();
                                     if (requestData.stage == RequestStage.CONNECTED) {
-                                        final Runnable writeClosure = new Runnable() {
-                                            @Override
-                                            public void run() {
-                                                try {
-                                                    requestData.socketChannel.write(requestLineWriteBuffer.asReadOnlyBuffer());
-                                                    requestData.stage = RequestStage.SENT_REQUEST_LINE;
-                                                    selectionKey.interestOps(SelectionKey.OP_WRITE);
-                                                } catch (IOException e) {
-                                                    if (verboseErrors)
-                                                        logger.error("error writing request line to socket", e);
-                                                    try {
-                                                        closeKeyOnError(selectionKey);
-                                                    } catch (IOException e1) {
-                                                        throw Throwables.propagate(e1);
-                                                    }
-                                                } finally {
-                                                    requestData.inScheduledSlowOp = false;
-                                                }
-                                            }
-                                        };
-
-                                        if (slowFirstLine) {
-                                            if (!requestData.inScheduledSlowOp) {
-                                                requestData.inScheduledSlowOp = true;
-                                                final TimeCallback timeCallback = new TimeCallback();
-                                                timeCallback.scheduledAt = System.currentTimeMillis() + slowFirstLinePauseMs;
-                                                timeCallback.callback = writeClosure;
-                                                timers.add(timeCallback);
-                                                selectionKey.interestOps(0);
-                                            }
-                                        } else {
-                                            writeClosure.run();
-                                        }
-                                    } else if (requestData.stage == RequestStage.SENT_REQUEST_LINE) {
                                         final Runnable writeClosure = new Runnable() {
                                             @Override
                                             public void run() {
@@ -572,7 +544,7 @@ public class RuthlessClientTest {
                 responseReadBuffer.flip();
                 payloadReadBuffer.put(responseReadBuffer);
                 responseReadBuffer.clear();
-                
+
                 return payloadReadBuffer.position() == postPayloadSize;
             }
 
@@ -615,7 +587,7 @@ public class RuthlessClientTest {
             if (responseReadBuffer.hasRemaining())
                 decoder.decode(responseReadBuffer, currentHeaderCharBuffer, false);
             responseReadBuffer.clear();
-            
+
             return false;
         }
 
@@ -648,6 +620,6 @@ public class RuthlessClientTest {
     }
 
     private enum RequestStage {
-        CONNECTED, SENT_REQUEST_LINE, SENT_HEADERS, SENT_PAYLOAD
+        CONNECTED, SENT_HEADERS, SENT_PAYLOAD
     }
 }
