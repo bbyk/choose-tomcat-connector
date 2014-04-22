@@ -212,13 +212,11 @@ public class RuthlessClientTest {
                                                 final int read = requestData.socketChannel.read(requestData.responseReadBuffer);
                                                 if (logger.isDebugEnabled())
                                                     logger.debug("read bytes: " + read);
-                                                if (read == -1) {
+                                                if (read == -1 || requestData.processReadBuffer()) {
                                                     readCount.incrementAndGet();
                                                     closeKey(selectionKey);
                                                     requestData.finishRead();
-                                                } else {
-                                                    requestData.processReadBuffer();
-                                                }
+                                                } 
                                             } catch (IOException e) {
                                                 if (verboseErrors)
                                                     logger.error("error reading data", e);
@@ -569,11 +567,13 @@ public class RuthlessClientTest {
             }
         }
 
-        public void processReadBuffer() {
+        public boolean processReadBuffer() {
             if (!inProcessingHeader) {
                 responseReadBuffer.flip();
                 payloadReadBuffer.put(responseReadBuffer);
                 responseReadBuffer.clear();
+                
+                return payloadReadBuffer.position() == postPayloadSize;
             }
 
             responseReadBuffer.flip();
@@ -603,7 +603,7 @@ public class RuthlessClientTest {
                             inProcessingHeader = false;
                             payloadReadBuffer.put(responseReadBuffer);
                             responseReadBuffer.clear();
-                            return;
+                            return false;
                         }
 
                         currentHeaderCharBuffer.clear();
@@ -615,6 +615,8 @@ public class RuthlessClientTest {
             if (responseReadBuffer.hasRemaining())
                 decoder.decode(responseReadBuffer, currentHeaderCharBuffer, false);
             responseReadBuffer.clear();
+            
+            return false;
         }
 
         public void finishRead() throws IOException {
