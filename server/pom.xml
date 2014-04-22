@@ -59,7 +59,7 @@
                     <configurationDir>${project.build.directory}/tomcat</configurationDir>
                     <uriEncoding>UTF-8</uriEncoding>
                     <hostName>localhost</hostName>
-                    <port>8080</port>
+                    <port>8081</port>
                     <update>true</update>
                     <systemProperties>
                         <com.sun.management.jmxremote.port>13380</com.sun.management.jmxremote.port>
@@ -87,6 +87,12 @@
     </dependencies>
     
     <profiles>
+        <profile>
+            <id>apr</id>
+            <properties>
+                <server.xml.loc>${basedir}/extras/tomcatConf/server-apr.xml</server.xml.loc>
+            </properties>
+        </profile>
         <profile>
             <id>nio</id>
             <properties>

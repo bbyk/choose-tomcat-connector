@@ -126,11 +126,14 @@ public class RuthlessClientTest {
                         //noinspection InfiniteLoopStatement
                         while (true) {
                             // run pending callbacks
+                            long timeTillNext;
                             while (true) {
+                                timeTillNext = -1;
                                 final TimeCallback callback = timers.peek();
                                 if (callback == null)
                                     break;
-                                if (callback.scheduledAt > System.currentTimeMillis())
+                                timeTillNext = callback.scheduledAt - System.currentTimeMillis();
+                                if (timeTillNext > 0)
                                     break;
 
                                 timers.poll(); // remove it
@@ -157,10 +160,10 @@ public class RuthlessClientTest {
                             }
 
                             // now let's fetch what's changed (epoll / kqueue)
-                            final int selected = selector.select();
+                            final int selected = selector.select(timeTillNext < 0 ? 3600 : timeTillNext);
                             if (logger.isDebugEnabled())
                                 logger.debug("selected: " + selected);
-                            
+
                             final Set<SelectionKey> selectionKeys = selector.selectedKeys();
                             if (logger.isDebugEnabled())
                                 logger.debug("selected keys: " + selectionKeys.size());
@@ -202,6 +205,7 @@ public class RuthlessClientTest {
                                             try {
                                                 // The buffer into which we'll read data when it's available
                                                 requestData.responseReadBuffer.clear();
+                                                selectionKey.interestOps(SelectionKey.OP_READ);
 
                                                 final int read = requestData.socketChannel.read(requestData.responseReadBuffer);
                                                 if (logger.isDebugEnabled())
@@ -234,6 +238,7 @@ public class RuthlessClientTest {
                                             timeCallback.scheduledAt = System.currentTimeMillis() + slowReadPauseMs;
                                             timeCallback.callback = readClosure;
                                             timers.add(timeCallback);
+                                            selectionKey.interestOps(0);
                                         }
                                     } else {
                                         readClosure.run();
@@ -256,8 +261,7 @@ public class RuthlessClientTest {
                                                     } catch (IOException e1) {
                                                         throw Throwables.propagate(e1);
                                                     }
-                                                }
-                                                finally {
+                                                } finally {
                                                     requestData.inScheduledSlowOp = false;
                                                 }
                                             }
@@ -270,6 +274,7 @@ public class RuthlessClientTest {
                                                 timeCallback.scheduledAt = System.currentTimeMillis() + slowFirstLinePauseMs;
                                                 timeCallback.callback = writeClosure;
                                                 timers.add(timeCallback);
+                                                selectionKey.interestOps(0);
                                             }
                                         } else {
                                             writeClosure.run();
@@ -283,6 +288,7 @@ public class RuthlessClientTest {
                                                     requestData.socketChannel.write(bufferToSendWithOutWaiting);
                                                     if (!requestData.hasMoreHeadersToSend())
                                                         requestData.stage = RequestStage.SENT_HEADERS;
+                                                    selectionKey.interestOps(SelectionKey.OP_WRITE);
                                                 } catch (IOException e) {
                                                     if (verboseErrors)
                                                         logger.error("error writing headers to socket", e);
@@ -291,8 +297,7 @@ public class RuthlessClientTest {
                                                     } catch (IOException e1) {
                                                         throw Throwables.propagate(e1);
                                                     }
-                                                }
-                                                finally {
+                                                } finally {
                                                     requestData.inScheduledSlowOp = false;
                                                 }
                                             }
@@ -304,6 +309,7 @@ public class RuthlessClientTest {
                                                 timeCallback.scheduledAt = System.currentTimeMillis() + slowHeadersWritePauseMs;
                                                 timeCallback.callback = writeClosure;
                                                 timers.add(timeCallback);
+                                                selectionKey.interestOps(0);
                                             }
                                         } else {
                                             writeClosure.run();
@@ -315,9 +321,10 @@ public class RuthlessClientTest {
                                                 try {
                                                     ByteBuffer bufferToSendWithOutWaiting = requestData.getCurrentPayloadSlice();
                                                     requestData.socketChannel.write(bufferToSendWithOutWaiting);
-                                                    if (!requestData.hasMorePayloadToSend()) {
+                                                    if (requestData.hasMorePayloadToSend()) {
+                                                        selectionKey.interestOps(SelectionKey.OP_WRITE);
+                                                    } else {
                                                         requestData.stage = RequestStage.SENT_PAYLOAD;
-
                                                         selectionKey.interestOps(SelectionKey.OP_READ);
                                                     }
                                                 } catch (IOException e) {
@@ -328,8 +335,7 @@ public class RuthlessClientTest {
                                                     } catch (IOException e1) {
                                                         throw Throwables.propagate(e1);
                                                     }
-                                                }
-                                                finally {
+                                                } finally {
                                                     requestData.inScheduledSlowOp = false;
                                                 }
                                             }
@@ -341,6 +347,7 @@ public class RuthlessClientTest {
                                                 timeCallback.scheduledAt = System.currentTimeMillis() + slowPayloadWritePauseMs;
                                                 timeCallback.callback = writeClosure;
                                                 timers.add(timeCallback);
+                                                selectionKey.interestOps(0);
                                             }
                                         } else {
                                             writeClosure.run();
