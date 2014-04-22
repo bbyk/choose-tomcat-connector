@@ -18,7 +18,7 @@
         <apache.tomcat.version>2.1</apache.tomcat.version>
         <tomcat.serverId>ViharTomcatServer</tomcat.serverId>
         <tomcat.serverUrl>http://localhost:8080/manager/text</tomcat.serverUrl>
-        <servlet.version>2.5</servlet.version>
+        <servlet.version>3.1.0</servlet.version>
         <commons-io.version>2.4</commons-io.version>
         <maven.compiler.version>2.5</maven.compiler.version>
         <java.version>1.6</java.version>
@@ -75,7 +75,7 @@
         <!-- SERVLET -->
         <dependency>
             <groupId>javax.servlet</groupId>
-            <artifactId>servlet-api</artifactId>
+            <artifactId>javax.servlet-api</artifactId>
             <version>${servlet.version}</version>
             <scope>provided</scope>
         </dependency>
