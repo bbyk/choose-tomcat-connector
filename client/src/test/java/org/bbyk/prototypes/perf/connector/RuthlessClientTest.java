@@ -126,15 +126,17 @@ public class RuthlessClientTest {
                         //noinspection InfiniteLoopStatement
                         while (true) {
                             // run pending callbacks
-                            long timeTillNext;
+                            long timeTillNextCallback = 3600;
                             while (true) {
-                                timeTillNext = -1;
                                 final TimeCallback callback = timers.peek();
                                 if (callback == null)
                                     break;
-                                timeTillNext = callback.scheduledAt - System.currentTimeMillis();
-                                if (timeTillNext > 0)
+                                final long delta = callback.scheduledAt - System.currentTimeMillis();
+                                if (delta > 0)
+                                {
+                                    timeTillNextCallback = delta;
                                     break;
+                                }
 
                                 timers.poll(); // remove it
                                 callback.callback.run();
@@ -160,7 +162,7 @@ public class RuthlessClientTest {
                             }
 
                             // now let's fetch what's changed (epoll / kqueue)
-                            final int selected = selector.select(timeTillNext < 0 ? 3600 : timeTillNext);
+                            final int selected = selector.select(timeTillNextCallback);
                             if (logger.isDebugEnabled())
                                 logger.debug("selected: " + selected);
 
