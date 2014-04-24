@@ -13,8 +13,6 @@ import java.nio.charset.Charset;
  * @author bbyk
  */
 public class EchoResponseServlet extends HttpServlet {
-    private final static Charset utf8Charset = Charset.forName("utf8");
-
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         final byte[] content = IOUtils.toByteArray(req.getInputStream());
